@@ -1,0 +1,86 @@
+name: Build, SonarQube Scan, and Email
+ 
+on:
+  pull_request:
+    branches:
+      - master
+ 
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for better relevancy of analysis
+ 
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+ 
+      - name: Upload SonarQube Report
+        uses: actions/upload-artifact@v2
+        with:
+          name: sonarqube-report
+          path: .scannerwork/report-task.txt
+ 
+  review:
+    name: Review Pull Request
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Add Reviewer
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/requested_reviewers" \
+            -d '{
+                  "reviewers": ["triniha"]
+                }'
+ 
+      - name: Wait for Review Approval
+        id: wait_for_review
+        run: |
+          REVIEW_STATE=""
+          while [[ "${REVIEW_STATE}" != "APPROVED" ]]; do
+            sleep 60  # Wait for a minute before checking again
+            REVIEW_STATE=$(curl -s -H "Authorization: Bearer ${{ secrets.TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" | jq -r '.[] | select(.user.login == "triniha") | .state')
+          done
+        shell: bash
+ 
+  email:
+    name: Send SonarQube Report via Email
+    runs-on: ubuntu-latest
+    needs: review
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+ 
+      - name: Download SonarQube Report Artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: sonarqube-report
+ 
+      - name: Fetch SonarQube Issues
+        run: |
+          curl -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=testing-sonar&resolved=false" \
+            -o sonarqube-issues.json
+ 
+      - name: Send SonarQube Report via Email
+        uses: dawidd6/action-send-mail@v2
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: SonarQube Report
+          body: email-body.txt
+          to: ${{ secrets.EMAIL_TO }}
+          from: ${{ secrets.EMAIL_FROM }}
+          attachments: sonarqube-issues.json
+          content_type: application/json
